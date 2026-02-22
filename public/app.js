@@ -7,20 +7,16 @@ const submitBtn = document.getElementById('submit-btn');
 
 let latestResults = [];
 
-const INVIDIOUS_INSTANCES = [
-  'https://invidious.privacyredirect.com',
-  'https://invidious.fdn.fr',
-  'https://iv.nboeck.de',
-  'https://invidious.projectsegfau.lt',
-  'https://yewtu.be'
-];
-
 function parseLinks(rawValue) {
-  return rawValue.split('\n').map((line) => line.trim()).filter(Boolean);
+  return rawValue
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function extractVideoId(url) {
   if (!url || typeof url !== 'string') return null;
+
   const cleanUrl = url.trim();
   if (!cleanUrl) return null;
 
@@ -57,207 +53,39 @@ function decodeHtmlEntities(text) {
 
 function splitSentences(text) {
   if (!text) return [];
-  return text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
 }
 
-function vttToText(vtt) {
-  return vtt
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('WEBVTT') && !line.includes('-->') && !/^\d+$/.test(line))
-    .join(' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+async function fetchViaProxy(url) {
+  const encodedUrl = encodeURIComponent(url);
+  const response = await fetch(`https://api.allorigins.win/raw?url=${encodedUrl}`);
+  if (!response.ok) {
+    throw new Error('Falha na requisição de proxy.');
+  }
+  return response.text();
 }
 
-async function fetchWithTimeout(url, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+async function getTranscriptFromYoutube(videoId) {
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const watchHtml = await fetchViaProxy(watchUrl);
+
+  const captionTracksMatch = watchHtml.match(/"captionTracks":(\[[^\]]+\])/);
+  if (!captionTracksMatch) {
+    throw new Error('Vídeo sem legendas disponíveis.');
+  }
+
+  let captionTracks;
   try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.text();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function fetchViaProxy(targetUrl) {
-  const encoded = encodeURIComponent(targetUrl);
-  const proxyUrls = [
-    `https://api.allorigins.win/raw?url=${encoded}`,
-    `https://corsproxy.io/?${encoded}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encoded}`
-  ];
-
-  let lastError = null;
-  for (const proxyUrl of proxyUrls) {
-    try {
-      return await fetchWithTimeout(proxyUrl);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw new Error(`Todos os proxies falharam (${lastError?.message || 'erro desconhecido'}).`);
-}
-
-function extractJsonObjectAfterMarker(source, marker) {
-  const markerIndex = source.indexOf(marker);
-  if (markerIndex === -1) return null;
-
-  const startIndex = source.indexOf('{', markerIndex);
-  if (startIndex === -1) return null;
-
-  let depth = 0;
-  let inString = false;
-  let escaping = false;
-
-  for (let i = startIndex; i < source.length; i += 1) {
-    const char = source[i];
-
-    if (inString) {
-      if (escaping) {
-        escaping = false;
-      } else if (char === '\\') {
-        escaping = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (char === '{') depth += 1;
-    if (char === '}') depth -= 1;
-
-    if (depth === 0) {
-      return source.slice(startIndex, i + 1);
-    }
-  }
-
-  return null;
-}
-
-async function getTranscriptFromInvidious(videoId) {
-  const errors = [];
-
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      const listRaw = await fetchWithTimeout(`${instance}/api/v1/captions/${videoId}`);
-      const tracks = JSON.parse(listRaw);
-      if (!Array.isArray(tracks) || tracks.length === 0) {
-        throw new Error('instância sem trilhas para este vídeo');
-      }
-
-      const preferred =
-        tracks.find((t) => t.language_code === 'pt-BR') ||
-        tracks.find((t) => t.language_code === 'pt') ||
-        tracks[0];
-
-      const trackUrl = preferred?.url?.startsWith('http')
-        ? preferred.url
-        : `${instance}${preferred?.url || ''}`;
-
-      if (!trackUrl) {
-        throw new Error('trilha sem URL');
-      }
-
-      const vtt = await fetchWithTimeout(trackUrl);
-      const transcriptText = vttToText(vtt);
-      if (!transcriptText) {
-        throw new Error('VTT retornou sem texto útil');
-      }
-
-      return transcriptText;
-    } catch (error) {
-      errors.push(`${instance}: ${error.message}`);
-    }
-  }
-
-  throw new Error(`Invidious indisponível (${errors.slice(0, 2).join(' | ')})`);
-}
-
-function parseTracksXml(xml) {
-  const trackRegex = /<track\s+([^>]+?)\s*\/?>/g;
-  const attrRegex = /(\w+)="([^"]*)"/g;
-  const tracks = [];
-
-  for (const match of xml.matchAll(trackRegex)) {
-    const attrs = {};
-    for (const attrMatch of match[1].matchAll(attrRegex)) {
-      attrs[attrMatch[1]] = decodeHtmlEntities(attrMatch[2]);
-    }
-    tracks.push(attrs);
-  }
-
-  return tracks;
-}
-
-function parseTranscriptXml(xml) {
-  const textMatches = [...xml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)];
-  return textMatches
-    .map((match) => decodeHtmlEntities(match[1].replace(/\n/g, ' ').trim()))
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function getTranscriptFromTimedtext(videoId) {
-  const listXml = await fetchViaProxy(`https://video.google.com/timedtext?type=list&v=${videoId}`);
-  const tracks = parseTracksXml(listXml);
-
-  if (!tracks.length) {
-    throw new Error('Vídeo sem trilhas de legenda públicas.');
-  }
-
-  const preferredTrack =
-    tracks.find((track) => track.lang_code === 'pt-BR') ||
-    tracks.find((track) => track.lang_code === 'pt') ||
-    tracks[0];
-
-  const params = new URLSearchParams({
-    v: videoId,
-    lang: preferredTrack.lang_code,
-    fmt: 'srv3'
-  });
-
-  if (preferredTrack.name) params.set('name', preferredTrack.name);
-
-  const transcriptXml = await fetchViaProxy(`https://video.google.com/timedtext?${params.toString()}`);
-  const transcriptText = parseTranscriptXml(transcriptXml);
-
-  if (!transcriptText) throw new Error('Legenda disponível, mas sem texto extraível.');
-  return transcriptText;
-}
-
-async function getTranscriptFromWatchHtml(videoId) {
-  const watchHtml = await fetchViaProxy(`https://www.youtube.com/watch?v=${videoId}`);
-
-  if (!watchHtml || watchHtml.length < 1000 || watchHtml.includes('Sorry, something went wrong')) {
-    throw new Error('Proxy retornou HTML inválido/incompleto para a página do vídeo.');
-  }
-
-  const playerJsonText = extractJsonObjectAfterMarker(watchHtml, 'ytInitialPlayerResponse');
-  if (!playerJsonText) {
-    throw new Error('ytInitialPlayerResponse não encontrado no HTML retornado.');
-  }
-
-  let playerResponse;
-  try {
-    playerResponse = JSON.parse(playerJsonText);
+    captionTracks = JSON.parse(captionTracksMatch[1]);
   } catch {
-    throw new Error('Falha ao fazer parse do ytInitialPlayerResponse.');
+    throw new Error('Falha ao interpretar trilhas de legenda.');
   }
 
-  const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!Array.isArray(captionTracks) || captionTracks.length === 0) {
-    throw new Error('Vídeo sem captionTracks disponíveis no player response.');
+    throw new Error('Nenhuma trilha de legenda encontrada.');
   }
 
   const preferredTrack =
@@ -266,46 +94,34 @@ async function getTranscriptFromWatchHtml(videoId) {
     captionTracks[0];
 
   if (!preferredTrack?.baseUrl) {
-    throw new Error('captionTrack sem baseUrl.');
+    throw new Error('URL de legenda ausente.');
   }
 
-  const transcriptXml = await fetchViaProxy(preferredTrack.baseUrl);
-  const transcriptText = parseTranscriptXml(transcriptXml);
+  const xml = await fetchViaProxy(preferredTrack.baseUrl);
+  const textMatches = [...xml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)];
+
+  const transcriptText = textMatches
+    .map((match) => decodeHtmlEntities(match[1].replace(/\n/g, ' ').trim()))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   if (!transcriptText) {
-    throw new Error('captionTrack encontrada, mas XML sem texto extraível.');
+    throw new Error('Transcrição vazia.');
   }
 
   return transcriptText;
 }
 
-async function getTranscriptFromYoutube(videoId) {
-  const errors = [];
-
-  try {
-    return await getTranscriptFromInvidious(videoId);
-  } catch (error) {
-    errors.push(`invidious: ${error.message}`);
-  }
-
-  try {
-    return await getTranscriptFromTimedtext(videoId);
-  } catch (error) {
-    errors.push(`timedtext: ${error.message}`);
-  }
-
-  try {
-    return await getTranscriptFromWatchHtml(videoId);
-  } catch (error) {
-    errors.push(`watch-html: ${error.message}`);
-  }
-
-  throw new Error(errors.join(' | '));
-}
-
 async function processLink(link) {
   const videoId = extractVideoId(link);
+
   if (!videoId) {
-    return { link, ok: false, error: 'Link inválido ou ID de vídeo não encontrado.' };
+    return {
+      link,
+      ok: false,
+      error: 'Link inválido ou ID de vídeo não encontrado.'
+    };
   }
 
   const screenshotUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
@@ -313,22 +129,34 @@ async function processLink(link) {
   try {
     const transcriptText = await getTranscriptFromYoutube(videoId);
     const sentences = splitSentences(transcriptText);
+
     const firstThreeSentences = (sentences.length >= 3 ? sentences : transcriptText.split(','))
       .map((part) => part.trim())
       .filter(Boolean)
       .slice(0, 3);
 
-    if (!firstThreeSentences.length) {
-      return { link, ok: false, screenshotUrl, error: 'Não foi possível extrair frases do vídeo.' };
+    if (firstThreeSentences.length === 0) {
+      return {
+        link,
+        ok: false,
+        screenshotUrl,
+        error: 'Não foi possível extrair frases do vídeo.'
+      };
     }
 
-    return { link, ok: true, videoId, screenshotUrl, firstThreeSentences };
-  } catch (error) {
+    return {
+      link,
+      ok: true,
+      videoId,
+      screenshotUrl,
+      firstThreeSentences
+    };
+  } catch {
     return {
       link,
       ok: false,
       screenshotUrl,
-      error: `Falha ao buscar legenda/transcrição. Detalhe: ${error.message}`
+      error: 'Falha ao buscar legenda/transcrição. Pode faltar legenda ou o proxy pode estar indisponível.'
     };
   }
 }
@@ -354,7 +182,10 @@ function renderResults(results) {
     card.className = 'card';
 
     if (!item.ok) {
-      card.innerHTML = `<p class="meta">${item.link}</p><p class="error">${item.error}</p>`;
+      card.innerHTML = `
+        <p class="meta">${item.link}</p>
+        <p class="error">${item.error}</p>
+      `;
       resultsEl.appendChild(card);
       return;
     }
@@ -398,7 +229,8 @@ copyAllBtn.addEventListener('click', async () => {
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const links = parseLinks(linksInput.value);
-  if (!links.length) return;
+
+  if (links.length === 0) return;
 
   submitBtn.disabled = true;
   submitBtn.textContent = 'Processando...';
