@@ -1,0 +1,10 @@
+{
+  "name": "ang-hooks-shorts",
+  "version": "1.0.0",
+  "description": "Ferramenta web para extrair frame inicial e 3 primeiras frases de shorts do YouTube",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}

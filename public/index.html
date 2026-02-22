@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Extrator de Shorts</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Extrator de Shorts do YouTube</h1>
+      <p>
+        Cole um ou mais links (um por linha) para receber um print inicial do vídeo e as 3
+        primeiras frases da transcrição.
+      </p>
+      <p class="warning">
+        Versão para GitHub Pages: o processamento ocorre no navegador usando proxy público e pode
+        falhar em vídeos sem legenda ou quando o proxy estiver indisponível.
+      </p>
+
+      <form id="shorts-form">
+        <label for="links">Links dos Shorts</label>
+        <textarea
+          id="links"
+          name="links"
+          rows="8"
+          placeholder="https://youtube.com/shorts/..."
+          required
+        ></textarea>
+        <button type="submit" id="submit-btn">Processar links</button>
+      </form>
+
+      <section id="actions" class="actions hidden">
+        <button id="copy-all-btn" type="button">Copiar tudo</button>
+      </section>
+
+      <section id="results" class="results"></section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
