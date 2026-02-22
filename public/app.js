@@ -59,131 +59,33 @@ function splitSentences(text) {
     .filter(Boolean);
 }
 
-async function fetchWithTimeout(url, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    return await response.text();
-  } finally {
-    clearTimeout(timer);
+async function fetchViaProxy(url) {
+  const encodedUrl = encodeURIComponent(url);
+  const response = await fetch(`https://api.allorigins.win/raw?url=${encodedUrl}`);
+  if (!response.ok) {
+    throw new Error('Falha na requisição de proxy.');
   }
+  return response.text();
 }
 
-async function fetchViaProxy(targetUrl) {
-  const encoded = encodeURIComponent(targetUrl);
-  const proxyUrls = [
-    `https://api.allorigins.win/raw?url=${encoded}`,
-    `https://corsproxy.io/?${encoded}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encoded}`
-  ];
-
-  let lastError = null;
-
-  for (const proxyUrl of proxyUrls) {
-    try {
-      return await fetchWithTimeout(proxyUrl);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw new Error(`Todos os proxies falharam (${lastError?.message || 'erro desconhecido'}).`);
-}
-
-function parseTracksXml(xml) {
-  const trackRegex = /<track\s+([^>]+?)\s*\/?>(?:<\/track>)?/g;
-  const attrRegex = /(\w+)="([^"]*)"/g;
-  const tracks = [];
-
-  for (const match of xml.matchAll(trackRegex)) {
-    const attrs = {};
-    for (const attrMatch of match[1].matchAll(attrRegex)) {
-      attrs[attrMatch[1]] = decodeHtmlEntities(attrMatch[2]);
-    }
-    tracks.push(attrs);
-  }
-
-  return tracks;
-}
-
-function parseTranscriptXml(xml) {
-  const textMatches = [...xml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)];
-
-  return textMatches
-    .map((match) => decodeHtmlEntities(match[1].replace(/\n/g, ' ').trim()))
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function getTranscriptFromTimedtext(videoId) {
-  const listUrl = `https://video.google.com/timedtext?type=list&v=${videoId}`;
-  const listXml = await fetchViaProxy(listUrl);
-  const tracks = parseTracksXml(listXml);
-
-  if (!Array.isArray(tracks) || tracks.length === 0) {
-    throw new Error('Vídeo sem trilhas de legenda públicas.');
-  }
-
-  const preferredTrack =
-    tracks.find((track) => track.lang_code === 'pt-BR') ||
-    tracks.find((track) => track.lang_code === 'pt') ||
-    tracks[0];
-
-  const params = new URLSearchParams({
-    v: videoId,
-    lang: preferredTrack.lang_code,
-    fmt: 'srv3'
-  });
-
-  if (preferredTrack.name) {
-    params.set('name', preferredTrack.name);
-  }
-
-  const transcriptUrl = `https://video.google.com/timedtext?${params.toString()}`;
-  const transcriptXml = await fetchViaProxy(transcriptUrl);
-  const transcriptText = parseTranscriptXml(transcriptXml);
-
-  if (!transcriptText) {
-    throw new Error('Legenda disponível, mas vazia para este vídeo.');
-  }
-
-  return transcriptText;
-}
-
-async function getTranscriptFromWatchHtml(videoId) {
+async function getTranscriptFromYoutube(videoId) {
   const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const watchHtml = await fetchViaProxy(watchUrl);
 
-  const playerResponseMatch = watchHtml.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]*?\});/);
-  const captionTracksMatch = watchHtml.match(/"captionTracks":(\[[\s\S]*?\])/);
-
-  let captionTracks = null;
-
-  if (playerResponseMatch) {
-    try {
-      const playerResponse = JSON.parse(playerResponseMatch[1]);
-      captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || null;
-    } catch {
-      captionTracks = null;
-    }
+  const captionTracksMatch = watchHtml.match(/"captionTracks":(\[[^\]]+\])/);
+  if (!captionTracksMatch) {
+    throw new Error('Vídeo sem legendas disponíveis.');
   }
 
-  if (!captionTracks && captionTracksMatch) {
-    try {
-      captionTracks = JSON.parse(captionTracksMatch[1]);
-    } catch {
-      captionTracks = null;
-    }
+  let captionTracks;
+  try {
+    captionTracks = JSON.parse(captionTracksMatch[1]);
+  } catch {
+    throw new Error('Falha ao interpretar trilhas de legenda.');
   }
 
   if (!Array.isArray(captionTracks) || captionTracks.length === 0) {
-    throw new Error('Não foi possível localizar captionTracks no HTML do vídeo.');
+    throw new Error('Nenhuma trilha de legenda encontrada.');
   }
 
   const preferredTrack =
@@ -192,35 +94,23 @@ async function getTranscriptFromWatchHtml(videoId) {
     captionTracks[0];
 
   if (!preferredTrack?.baseUrl) {
-    throw new Error('A trilha encontrada não possui baseUrl.');
+    throw new Error('URL de legenda ausente.');
   }
 
-  const transcriptXml = await fetchViaProxy(preferredTrack.baseUrl);
-  const transcriptText = parseTranscriptXml(transcriptXml);
+  const xml = await fetchViaProxy(preferredTrack.baseUrl);
+  const textMatches = [...xml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)];
+
+  const transcriptText = textMatches
+    .map((match) => decodeHtmlEntities(match[1].replace(/\n/g, ' ').trim()))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
   if (!transcriptText) {
-    throw new Error('captionTrack encontrada, porém sem texto extraível.');
+    throw new Error('Transcrição vazia.');
   }
 
   return transcriptText;
-}
-
-async function getTranscriptFromYoutube(videoId) {
-  const errors = [];
-
-  try {
-    return await getTranscriptFromTimedtext(videoId);
-  } catch (error) {
-    errors.push(`timedtext: ${error.message}`);
-  }
-
-  try {
-    return await getTranscriptFromWatchHtml(videoId);
-  } catch (error) {
-    errors.push(`watch-html: ${error.message}`);
-  }
-
-  throw new Error(errors.join(' | '));
 }
 
 async function processLink(link) {
@@ -261,12 +151,12 @@ async function processLink(link) {
       screenshotUrl,
       firstThreeSentences
     };
-  } catch (error) {
+  } catch {
     return {
       link,
       ok: false,
       screenshotUrl,
-      error: `Falha ao buscar legenda/transcrição. Detalhe: ${error.message}`
+      error: 'Falha ao buscar legenda/transcrição. Pode faltar legenda ou o proxy pode estar indisponível.'
     };
   }
 }
